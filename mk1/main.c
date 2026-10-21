@@ -2,11 +2,14 @@
 #include "tm1637.h"
 #include "keyboard.h"
 
-#define CODE_LEN        4
-#define MAX_ATTEMPTS    3
-#define OPEN_TIME_MS    3000
-#define DENIED_TIME_MS  1500
-#define LOCK_TIME_MS    10000
+#define CODE_LEN          4
+#define MAX_ATTEMPTS      3
+#define OPEN_TIME_MS      3000
+#define DENIED_TIME_MS    1500
+#define LOCK_TIME_MS      10000
+#define BLINK_MS          250
+#define SAVED_TIME_MS     1500
+#define CHANGE_TIMEOUT_MS 15000
 
 #define LED_KEY_PIN     5
 #define LED_GREEN_PIN   9
@@ -20,6 +23,8 @@
 #define SEG_n     0x54
 #define SEG_r     0x50
 #define SEG_L     0x38
+#define SEG_d     0x5E
+#define SEG_o     0x5C
 
 volatile uint32_t tickCount;
 uint32_t last_display_update;
@@ -31,13 +36,17 @@ typedef enum {
   ST_INPUT,
   ST_OPEN,
   ST_DENIED,
-  ST_LOCKED
+  ST_LOCKED,
+  ST_CHANGE_NEW,
+  ST_CHANGE_CONFIRM,
+  ST_SAVED
 } AccessState;
 
 char SECRET_CODE[CODE_LEN] = {'1', '2', '3', '4'};
 
 AccessState state;
 char input[CODE_LEN];
+char newCode[CODE_LEN];
 uint8_t inputLen;
 uint8_t failedAttempts;
 uint32_t stateStart;
@@ -88,15 +97,15 @@ int _write(int file, uint8_t *ptr, int len) {
   return len;
 }
 
-void ledOn(uint8_t pin)  { 
-  GPIOA->BSRR = (1U << pin); 
+void ledOn(uint8_t pin)  {
+  GPIOA->BSRR = (1U << pin);
 }
 
-void ledOff(uint8_t pin) { 
-  GPIOA->BSRR = (1U << (pin + 16)); 
+void ledOff(uint8_t pin) {
+  GPIOA->BSRR = (1U << (pin + 16));
 }
 void ledToggle(uint8_t pin) {
-  GPIOA->ODR ^= (1U << pin); 
+  GPIOA->ODR ^= (1U << pin);
 }
 
 void showInput() {
@@ -117,6 +126,16 @@ void showError(uint8_t attemptsLeft) {
   tm1637_display_segments(seg);
 }
 
+void showMismatch() {
+  uint8_t seg[4] = {SEG_E, SEG_r, SEG_r, SEG_DASH};
+  tm1637_display_segments(seg);
+}
+
+void showSaved() {
+  uint8_t seg[4] = {SEG_d, SEG_o, SEG_n, SEG_E};
+  tm1637_display_segments(seg);
+}
+
 void showLocked(uint32_t seconds) {
   uint8_t seg[4] = {SEG_L, SEG_BLANK, SEG_BLANK, digit_codes[seconds % 10]};
   if (seconds >= 10) seg[2] = digit_codes[(seconds / 10) % 10];
@@ -134,9 +153,49 @@ void resetInput() {
   showInput();
 }
 
+void startCodeChange() {
+  printf("Code change: enter new code\n");
+  inputLen = 0;
+  lastBlink = tickCount;
+  enterState(ST_CHANGE_NEW);
+  showInput();
+}
+
+void cancelCodeChange() {
+  printf("Code change cancelled\n");
+  ledOff(LED_GREEN_PIN);
+  resetInput();
+}
+
+void processNewCode() {
+  if (state == ST_CHANGE_NEW) {
+    memcpy(newCode, input, CODE_LEN);
+    printf("Code change: confirm new code\n");
+    ledOn(LED_GREEN_PIN);
+    inputLen = 0;
+    enterState(ST_CHANGE_CONFIRM);
+    showInput();
+    return;
+  }
+
+  if (memcmp(input, newCode, CODE_LEN) == 0) {
+    memcpy(SECRET_CODE, newCode, CODE_LEN);
+    printf("New code saved\n");
+    ledOn(LED_GREEN_PIN);
+    showSaved();
+    enterState(ST_SAVED);
+  } else {
+    printf("Codes do not match, old code kept\n");
+    ledOff(LED_GREEN_PIN);
+    ledOn(LED_RED_PIN);
+    showMismatch();
+    enterState(ST_DENIED);
+  }
+}
+
 void checkCode() {
   if (memcmp(input, SECRET_CODE, CODE_LEN) == 0) {
-    printf("Access GRANTED\n");
+    printf("Access GRANTED (press # to change code)\n");
     failedAttempts = 0;
     ledOn(LED_GREEN_PIN);
     showOpen();
@@ -160,23 +219,38 @@ void checkCode() {
   }
 }
 
-static void handleKey(char key) {
-  if (state != ST_INPUT) return;
+void handleKey(char key) {
+  if (state == ST_OPEN) {
+    if (key == '#') startCodeChange();
+    return;
+  }
+
+  int changing = (state == ST_CHANGE_NEW || state == ST_CHANGE_CONFIRM);
+  if (state != ST_INPUT && !changing) return;
+
+  if (changing) stateStart = tickCount;
 
   if (key == '*') {
     if (inputLen > 0) inputLen--;
     showInput();
   } else if (key == '#') {
-    inputLen = 0;
-    showInput();
+    if (changing) {
+      cancelCodeChange();
+    } else {
+      inputLen = 0;
+      showInput();
+    }
   } else if (key >= '0' && key <= '9') {
     input[inputLen++] = key;
     showInput();
-    if (inputLen == CODE_LEN) checkCode();
+    if (inputLen == CODE_LEN) {
+      if (changing) processNewCode();
+      else checkCode();
+    }
   }
 }
 
-static void updateAccess() {
+void updateAccess() {
   uint32_t elapsed = tickCount - stateStart;
 
   switch (state) {
@@ -208,6 +282,25 @@ static void updateAccess() {
       if (seconds != lastShownSeconds) {
         lastShownSeconds = seconds;
         showLocked(seconds);
+      }
+      break;
+    case ST_CHANGE_NEW:
+      if (elapsed >= CHANGE_TIMEOUT_MS) {
+        cancelCodeChange();
+        break;
+      }
+      if (tickCount - lastBlink >= BLINK_MS) {
+        lastBlink = tickCount;
+        ledToggle(LED_GREEN_PIN);
+      }
+      break;
+    case ST_CHANGE_CONFIRM:
+      if (elapsed >= CHANGE_TIMEOUT_MS) cancelCodeChange();
+      break;
+    case ST_SAVED:
+      if (elapsed >= SAVED_TIME_MS) {
+        ledOff(LED_GREEN_PIN);
+        resetInput();
       }
       break;
     case ST_INPUT:

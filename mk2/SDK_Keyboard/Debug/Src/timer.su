@@ -1,0 +1,4 @@
+../Src/timer.c:28:13:showTime	24	static
+../Src/timer.c:35:6:timerRun	16	static
+../Src/timer.c:111:6:OLED_KB	16	static
+../Src/timer.c:121:6:oled_Reset	8	static

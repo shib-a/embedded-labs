@@ -1,0 +1,6 @@
+../Core/Src/freertos.c:184:6:StartTaskGame	24	static
+../Core/Src/freertos.c:204:6:StartTaskKeyboard	16	static
+../Core/Src/freertos.c:111:13:configureTimerForRunTimeStats	0	static
+../Core/Src/freertos.c:116:22:getRunTimeCounterValue	0	static
+../Core/Src/freertos.c:126:6:vApplicationGetIdleTaskMemory	4	static
+../Core/Src/freertos.c:140:6:MX_FREERTOS_Init	88	static
